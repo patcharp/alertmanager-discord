@@ -12,13 +12,16 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // Discord color values
 const (
-	ColorRed   = 0x992D22
-	ColorGreen = 0x2ECC71
-	ColorGrey  = 0x95A5A6
+	ColorRed    = 0x992D22
+	ColorOrange = 0xF0B816
+	ColorGreen  = 0x2ECC71
+	ColorGrey   = 0x95A5A6
+	ColorBlue   = 0x58b9ff
 )
 
 type alertManAlert struct {
@@ -73,6 +76,7 @@ const defaultListenAddress = "127.0.0.1:9094"
 var (
 	whURL         = flag.String("webhook.url", os.Getenv("DISCORD_WEBHOOK"), "Discord WebHook URL.")
 	listenAddress = flag.String("listen.address", os.Getenv("LISTEN_ADDRESS"), "Address:Port to listen on.")
+	debug         = flag.Bool("debug", os.Getenv("DEBUG") == "1", "Enable debug mode.")
 )
 
 func checkWhURL(whURL string) {
@@ -91,48 +95,79 @@ func checkWhURL(whURL string) {
 }
 
 func sendWebhook(amo *alertManOut) {
-	groupedAlerts := make(map[string][]alertManAlert)
-
-	for _, alert := range amo.Alerts {
-		groupedAlerts[alert.Status] = append(groupedAlerts[alert.Status], alert)
+	DO := discordOut{
+		Content: fmt.Sprintf("=== Alert: %s - %s ===", amo.Receiver, amo.GroupLabels.Alertname),
+		Embeds:  []discordEmbed{},
 	}
-
-	for status, alerts := range groupedAlerts {
-		DO := discordOut{}
-
-		RichEmbed := discordEmbed{
-			Title:       fmt.Sprintf("[%s:%d] %s", strings.ToUpper(status), len(alerts), amo.CommonLabels.Alertname),
-			Description: amo.CommonAnnotations.Summary,
-			Color:       ColorGrey,
-			Fields:      []discordEmbedField{},
+	for _, alert := range amo.Alerts {
+		status := alert.Status
+		embed := discordEmbed{
+			Color:  ColorGrey,
+			Fields: []discordEmbedField{},
 		}
-
-		if status == "firing" {
-			RichEmbed.Color = ColorRed
-		} else if status == "resolved" {
-			RichEmbed.Color = ColorGreen
-		}
-
-		if amo.CommonAnnotations.Summary != "" {
-			DO.Content = fmt.Sprintf(" === %s === \n", amo.CommonAnnotations.Summary)
-		}
-
-		for _, alert := range alerts {
-			realname := alert.Labels["instance"]
-			if strings.Contains(realname, "localhost") && alert.Labels["exported_instance"] != "" {
-				realname = alert.Labels["exported_instance"]
+		switch alert.Status {
+		case "firing":
+			if s, ok := alert.Labels["severity"]; ok {
+				status = s
 			}
-
-			RichEmbed.Fields = append(RichEmbed.Fields, discordEmbedField{
-				Name:  fmt.Sprintf("[%s]: %s on %s", strings.ToUpper(status), alert.Labels["alertname"], realname),
-				Value: alert.Annotations.Description,
-			})
+			embed.Color = getSeverityColor(status)
+			break
+		case "resolved":
+			embed.Color = ColorGreen
+			status = "normal"
+			break
 		}
+		startAt, _ := time.Parse(time.RFC3339, alert.StartsAt)
+		endAt, _ := time.Parse(time.RFC3339, alert.EndsAt)
+		embed.Title = fmt.Sprintf("[%s] %s", strings.ToUpper(status), alert.Annotations.Summary)
+		var labels []string
+		for k, v := range alert.Labels {
+			labels = append(labels, fmt.Sprintf(": - **_%s:_** %s", k, v))
+		}
+		description := strings.Split(alert.Annotations.Description, "\n")
+		for i, v := range description {
+			description[i] = fmt.Sprintf(": - %s", v)
+		}
+		var embedDescribe []string
+		eventTime := startAt
+		if endAt.After(startAt) {
+			eventTime = endAt
+		}
+		embedDescribe = append(embedDescribe, fmt.Sprintf("**⏰ Event Time:** %s", eventTime.Format(time.DateTime)))
+		embedDescribe = append(embedDescribe, fmt.Sprintf("**🏷️ Alert labels:**\n%s", strings.Join(labels, "\n")))
+		if status != "normal" {
+			// Abnormal state
+			embedDescribe = append(embedDescribe, "------")
+			embedDescribe = append(embedDescribe, fmt.Sprintf("**📖 Description:**\n%s", strings.Join(description, "\n")))
+		} else if endAt.After(startAt) {
+			embedDescribe = append(embedDescribe, "------")
+			embedDescribe = append(embedDescribe, fmt.Sprintf("**⏲️ Duration:** %s", endAt.Sub(startAt).String()))
+			embedDescribe = append(embedDescribe, fmt.Sprintf(": - **_Start:_** %s", startAt.Format(time.DateTime)))
+			embedDescribe = append(embedDescribe, fmt.Sprintf(": - **_End:_** %s", endAt.Format(time.DateTime)))
+		}
+		embed.Description = strings.Join(embedDescribe, "\n")
+		DO.Embeds = append(DO.Embeds, embed)
+	}
+	//
+	DOD, _ := json.Marshal(DO)
+	if *debug {
+		fmt.Println("Send webhook:", string(DOD))
+	}
+	http.Post(*whURL, "application/json", bytes.NewReader(DOD))
+}
 
-		DO.Embeds = []discordEmbed{RichEmbed}
-
-		DOD, _ := json.Marshal(DO)
-		http.Post(*whURL, "application/json", bytes.NewReader(DOD))
+func getSeverityColor(severity string) int {
+	switch severity {
+	case "debug":
+		return ColorGrey
+	case "info":
+		return ColorBlue
+	case "warning":
+		return ColorOrange
+	case "critical":
+		return ColorRed
+	default:
+		return ColorRed
 	}
 }
 
@@ -179,6 +214,10 @@ func main() {
 			b, err := ioutil.ReadAll(r.Body)
 			if err != nil {
 				panic(err)
+			}
+
+			if *debug {
+				fmt.Println("Receive webhook:", string(b))
 			}
 
 			amo := alertManOut{}
