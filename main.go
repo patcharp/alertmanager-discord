@@ -11,17 +11,19 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
 
 // Discord color values
 const (
-	ColorRed    = 0x992D22
-	ColorOrange = 0xF0B816
-	ColorGreen  = 0x2ECC71
-	ColorGrey   = 0x95A5A6
-	ColorBlue   = 0x58b9ff
+	MaxDiscordEmbed = 10
+	ColorRed        = 0x992D22
+	ColorOrange     = 0xF0B816
+	ColorGreen      = 0x2ECC71
+	ColorGrey       = 0x95A5A6
+	ColorBlue       = 0x58b9ff
 )
 
 type alertManAlert struct {
@@ -99,6 +101,7 @@ func sendWebhook(amo *alertManOut) {
 		Content: fmt.Sprintf("=== Alert: %s - %s ===", amo.Receiver, amo.GroupLabels.Alertname),
 		Embeds:  []discordEmbed{},
 	}
+	var embeds []discordEmbed
 	for _, alert := range amo.Alerts {
 		status := alert.Status
 		embed := discordEmbed{
@@ -117,12 +120,29 @@ func sendWebhook(amo *alertManOut) {
 			status = "normal"
 			break
 		}
-		startAt, _ := time.ParseInLocation(time.RFC3339, alert.StartsAt, time.Local)
-		endAt, _ := time.ParseInLocation(time.RFC3339, alert.EndsAt, time.Local)
+		loc, _ := time.LoadLocation(os.Getenv("TZ"))
+		startAt, _ := time.Parse(time.RFC3339, alert.StartsAt)
+		startAt = startAt.In(loc)
+		endAt, _ := time.Parse(time.RFC3339, alert.EndsAt)
+		endAt = endAt.In(loc)
 		embed.Title = fmt.Sprintf("[%s] %s", strings.ToUpper(status), alert.Annotations.Summary)
 		var labels []string
+		var metricsValue float64
+		var metricsConv string
 		for k, v := range alert.Labels {
+			if strings.HasPrefix(k, "metrics_") {
+				// ignore metrics
+				if k == "metrics_value" {
+					metricsValue, _ = strconv.ParseFloat(v, 64)
+				} else if k == "metrics_conv" {
+					metricsConv = v
+				}
+				continue
+			}
 			labels = append(labels, fmt.Sprintf(": - **_%s:_** %s", k, v))
+		}
+		if status != "normal" {
+			labels = append(labels, fmt.Sprintf(": - **_value:_** %s", valueConv(metricsValue, metricsConv)))
 		}
 		description := strings.Split(alert.Annotations.Description, "\n")
 		for i, v := range description {
@@ -135,25 +155,67 @@ func sendWebhook(amo *alertManOut) {
 		}
 		embedDescribe = append(embedDescribe, fmt.Sprintf("**⏰ Event Time:** %s", eventTime.Format(time.DateTime)))
 		embedDescribe = append(embedDescribe, fmt.Sprintf("**🏷️ Alert labels:**\n%s", strings.Join(labels, "\n")))
-		if status != "normal" {
-			// Abnormal state
-			embedDescribe = append(embedDescribe, "------")
-			embedDescribe = append(embedDescribe, fmt.Sprintf("**📖 Description:**\n%s", strings.Join(description, "\n")))
-		} else if endAt.After(startAt) {
+		// Abnormal state
+		embedDescribe = append(embedDescribe, "------")
+		embedDescribe = append(embedDescribe, fmt.Sprintf("**📖 Description:**\n%s", strings.Join(description, "\n")))
+		if endAt.After(startAt) {
 			embedDescribe = append(embedDescribe, "------")
 			embedDescribe = append(embedDescribe, fmt.Sprintf("**⏲️ Duration:** %s", endAt.Sub(startAt).String()))
 			embedDescribe = append(embedDescribe, fmt.Sprintf(": - **_Start:_** %s", startAt.Format(time.DateTime)))
 			embedDescribe = append(embedDescribe, fmt.Sprintf(": - **_End:_** %s", endAt.Format(time.DateTime)))
 		}
 		embed.Description = strings.Join(embedDescribe, "\n")
-		DO.Embeds = append(DO.Embeds, embed)
+		embeds = append(embeds, embed)
 	}
-	//
-	DOD, _ := json.Marshal(DO)
+
+	if len(embeds) > MaxDiscordEmbed {
+		// Set bulk send
+		for i := 0; i < len(embeds); i += MaxDiscordEmbed {
+			if i+MaxDiscordEmbed <= len(embeds) {
+				DO.Embeds = embeds[i : i+MaxDiscordEmbed]
+			} else {
+				DO.Embeds = embeds[i:]
+			}
+			fireMessageOut(DO)
+		}
+	} else {
+		DO.Embeds = embeds
+		fireMessageOut(DO)
+	}
+}
+
+func fireMessageOut(msg discordOut) {
+	DOD, _ := json.Marshal(msg)
 	if *debug {
 		fmt.Println("Send webhook:", string(DOD))
 	}
-	http.Post(*whURL, "application/json", bytes.NewReader(DOD))
+	r, err := http.Post(*whURL, "application/json", bytes.NewReader(DOD))
+	if err != nil {
+		log.Println("Send discord error -:", err)
+		return
+	}
+	if r.StatusCode >= http.StatusBadRequest {
+		b, _ := ioutil.ReadAll(r.Body)
+		log.Println("Discord server return error -:", r.StatusCode, string(b))
+	}
+}
+
+func valueConv(v float64, conv string) string {
+	switch conv {
+	case "duration":
+		// input is second
+		d := time.Duration(int64(v)) * time.Second
+		return d.String()
+	case "timestamp":
+		t := time.Unix(int64(v), 0)
+		return t.Format(time.DateTime)
+	case "updown":
+		if v == 1.0 {
+			return "up"
+		}
+		return "down"
+	}
+	return fmt.Sprintf("%.2f", v)
 }
 
 func getSeverityColor(severity string) int {
