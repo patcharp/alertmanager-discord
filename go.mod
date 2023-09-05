@@ -1,3 +1,3 @@
-module github.com/benjojo/alertmanager-discord
+module github.com/patcharp/alertmanager-discord
 
-go 1.15
+go 1.20
