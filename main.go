@@ -117,8 +117,8 @@ func sendWebhook(amo *alertManOut) {
 			status = "normal"
 			break
 		}
-		startAt, _ := time.Parse(time.RFC3339, alert.StartsAt)
-		endAt, _ := time.Parse(time.RFC3339, alert.EndsAt)
+		startAt, _ := time.ParseInLocation(time.RFC3339, alert.StartsAt, time.Local)
+		endAt, _ := time.ParseInLocation(time.RFC3339, alert.EndsAt, time.Local)
 		embed.Title = fmt.Sprintf("[%s] %s", strings.ToUpper(status), alert.Annotations.Summary)
 		var labels []string
 		for k, v := range alert.Labels {
