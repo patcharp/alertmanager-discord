@@ -139,6 +139,10 @@ func sendWebhook(amo *alertManOut) {
 				}
 				continue
 			}
+			// Ignore some key
+			if k == "value" {
+				continue
+			}
 			labels = append(labels, fmt.Sprintf(": - **_%s:_** %s", k, v))
 		}
 		if status != "normal" {
@@ -271,7 +275,7 @@ func main() {
 	log.Printf("Listening on: %s", *listenAddress)
 	log.Fatalf("Failed to listen on HTTP: %v",
 		http.ListenAndServe(*listenAddress, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			log.Printf("%s - [%s] %s", r.Host, r.Method, r.URL.RawPath)
+			log.Printf("%s - [%s] %s", r.Host, r.Method, r.URL)
 
 			b, err := ioutil.ReadAll(r.Body)
 			if err != nil {
